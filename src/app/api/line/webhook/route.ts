@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
 import { verifySignature, reply, getProfile, text } from '@/lib/line';
+import { chatComplete, openaiConfigured } from '@/lib/openai';
 import type { Agent, AutoReply } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -76,12 +77,13 @@ async function handleCustomerService(
   incoming: string,
   userId?: string
 ) {
-  const { data: agent } = await sb
+  const { data: agentRow } = await sb
     .from('agents')
     .select('*')
     .eq('type', 'customer_service')
     .eq('enabled', true)
-    .single<Agent>();
+    .single();
+  const agent = agentRow as Agent | null;
 
   if (!agent) return; // 客服 agent 停用則不自動回覆
 
@@ -92,18 +94,57 @@ async function handleCustomerService(
     .eq('enabled', true)
     .order('priority', { ascending: false });
 
+  const cfg = agent.config as {
+    fallback_reply?: string;
+    ai_enabled?: boolean;
+    system_prompt?: string;
+  };
+  const fallback = cfg?.fallback_reply ?? '感謝您的訊息，我們會盡快回覆您 🙏';
+
   const matched = (rules as AutoReply[] | null)?.find((r) => incoming.includes(r.keyword));
-  const fallback =
-    (agent.config as { fallback_reply?: string })?.fallback_reply ??
-    '感謝您的訊息，我們會盡快回覆您 🙏';
-  const replyText = matched?.reply_text ?? fallback;
+
+  let replyText: string;
+  let source: 'rule' | 'ai' | 'fallback';
+
+  if (matched) {
+    // 1) 關鍵字規則優先（快、免費、可控）
+    replyText = matched.reply_text;
+    source = 'rule';
+  } else if (openaiConfigured() && cfg?.ai_enabled !== false) {
+    // 2) 沒命中規則 → 交給 OpenAI 生成回覆
+    try {
+      const systemPrompt =
+        cfg?.system_prompt ??
+        [
+          '你是一個電商 Line 官方帳號的客服助理，請用繁體中文、親切簡潔地回覆顧客。',
+          '回覆控制在 2~3 句內，必要時可用 1 個 emoji。',
+          '若顧客問到你無法確定的資訊（如特定訂單狀態、金額、個資），請引導他留下訂單編號並說明會由專人協助，切勿編造。',
+        ].join('\n');
+      replyText = await chatComplete(
+        [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: incoming },
+        ],
+        { maxTokens: 400 }
+      );
+      source = 'ai';
+    } catch (e) {
+      console.error('OpenAI 回覆失敗，改用預設語', e);
+      replyText = fallback;
+      source = 'fallback';
+    }
+  } else {
+    // 3) 沒開 AI → 預設語
+    replyText = fallback;
+    source = 'fallback';
+  }
 
   await reply(replyToken, [text(replyText)]);
   await sb.from('messages').insert({
     agent_id: agent.id,
     line_user_id: userId ?? null,
     direction: 'outbound',
-    message_type: 'reply',
+    message_type: source === 'ai' ? 'ai_reply' : 'reply',
     content: replyText,
     status: 'sent',
   });

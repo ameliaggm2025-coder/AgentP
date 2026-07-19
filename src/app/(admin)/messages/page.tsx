@@ -4,7 +4,7 @@ import type { MessageLog } from '@/lib/types';
 export const dynamic = 'force-dynamic';
 
 const TYPE: Record<string, string> = {
-  push: '推播', multicast: '群發', reply: '回覆', broadcast: '群發活動', receive: '收到訊息',
+  push: '推播', multicast: '群發', reply: '回覆', ai_reply: 'AI 回覆', broadcast: '群發活動', receive: '收到訊息',
 };
 
 async function load() {

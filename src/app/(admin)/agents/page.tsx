@@ -63,6 +63,9 @@ export default async function AgentsPage() {
 
                   {a.type === 'customer_service' && (
                     <div className="mt">
+                      <div className="notice" style={{ marginBottom: 12 }}>
+                        🤖 AI 回覆已啟用（OpenAI）：關鍵字規則優先，未命中時由 OpenAI 依語意自動生成回覆。
+                      </div>
                       <div className="muted" style={{ fontSize: 13, marginBottom: 6 }}>自動回覆規則</div>
                       <table>
                         <thead>
