@@ -11,38 +11,92 @@ export async function GET() {
   return NextResponse.json({ ok: true });
 }
 
+type Channel = {
+  agent: Agent | null;
+  secret?: string; // 該 OA 的 channel secret（多租戶）
+  token?: string; // 該 OA 的 access token（多租戶）
+};
+
+/**
+ * 依 webhook payload 的 destination（該 OA 的 bot userId）找出對應公司角色。
+ * 多租戶：一支 webhook 服務多家 OA。
+ * 找不到對應（或 config 未設 line_destination）→ 回退單一 OA（用環境變數）。
+ */
+async function resolveChannel(
+  sb: ReturnType<typeof supabaseAdmin>,
+  destination: string | undefined
+): Promise<Channel> {
+  // 1) 多租戶：以 destination 對應到某公司角色
+  if (destination) {
+    const { data } = await sb
+      .from('agents')
+      .select('*')
+      .eq('type', 'customer_service')
+      .eq('enabled', true)
+      .eq('config->>line_destination', destination)
+      .limit(1);
+    const agent = (data?.[0] as Agent | undefined) ?? null;
+    if (agent) {
+      const cfg = agent.config as {
+        line_channel_secret?: string;
+        line_channel_access_token?: string;
+      };
+      return { agent, secret: cfg.line_channel_secret, token: cfg.line_channel_access_token };
+    }
+  }
+  // 2) 回退：單一 OA（環境變數 secret/token）＋任一啟用的 customer_service（優先未設 line_destination 者）
+  const { data: fallback } = await sb
+    .from('agents')
+    .select('*')
+    .eq('type', 'customer_service')
+    .eq('enabled', true)
+    .order('updated_at', { ascending: true })
+    .limit(1);
+  return { agent: (fallback?.[0] as Agent | undefined) ?? null };
+}
+
 export async function POST(req: Request) {
   const raw = await req.text();
   const signature = req.headers.get('x-line-signature');
 
-  if (!verifySignature(raw, signature)) {
-    return NextResponse.json({ error: 'invalid signature' }, { status: 401 });
-  }
-
-  let events: any[] = [];
+  let parsed: { destination?: string; events?: unknown[] } = {};
   try {
-    events = JSON.parse(raw).events ?? [];
+    parsed = JSON.parse(raw);
   } catch {
     return NextResponse.json({ ok: true });
   }
 
   const sb = supabaseAdmin();
+  const channel = await resolveChannel(sb, parsed.destination);
+
+  // 用該 OA 的 secret（多租戶）或環境變數（單一 OA）驗簽
+  if (!verifySignature(raw, signature, channel.secret)) {
+    return NextResponse.json({ error: 'invalid signature' }, { status: 401 });
+  }
+
+  const events = (parsed.events ?? []) as any[];
+  const token = channel.token; // undefined → line.ts 用環境變數 token
 
   for (const ev of events) {
     const userId: string | undefined = ev.source?.userId;
     try {
       if (ev.type === 'follow' && userId) {
-        const profile = await getProfile(userId);
+        const profile = await getProfile(userId, token);
         await sb.from('line_users').upsert(
           {
             line_user_id: userId,
             display_name: profile?.displayName ?? null,
             picture_url: profile?.pictureUrl ?? null,
             status: 'active',
+            tags: channel.agent?.config
+              ? [(channel.agent.config as { company?: string }).company ?? '']
+                  .filter(Boolean)
+              : [],
           },
           { onConflict: 'line_user_id' }
         );
         await sb.from('messages').insert({
+          agent_id: channel.agent?.id ?? null,
           line_user_id: userId,
           direction: 'inbound',
           message_type: 'receive',
@@ -54,16 +108,16 @@ export async function POST(req: Request) {
       } else if (ev.type === 'message' && ev.message?.type === 'text') {
         const incoming: string = ev.message.text ?? '';
         await sb.from('messages').insert({
+          agent_id: channel.agent?.id ?? null,
           line_user_id: userId ?? null,
           direction: 'inbound',
           message_type: 'receive',
           content: incoming,
           status: 'received',
         });
-        await handleCustomerService(sb, ev.replyToken, incoming, userId);
+        await handleCustomerService(sb, channel.agent, ev.replyToken, incoming, userId, token);
       }
     } catch (e) {
-      // 單一事件失敗不影響其他事件；仍回 200 避免 Line 重送
       console.error('webhook event error', e);
     }
   }
@@ -73,19 +127,13 @@ export async function POST(req: Request) {
 
 async function handleCustomerService(
   sb: ReturnType<typeof supabaseAdmin>,
+  agent: Agent | null,
   replyToken: string,
   incoming: string,
-  userId?: string
+  userId: string | undefined,
+  token: string | undefined
 ) {
-  const { data: agentRow } = await sb
-    .from('agents')
-    .select('*')
-    .eq('type', 'customer_service')
-    .eq('enabled', true)
-    .single();
-  const agent = agentRow as Agent | null;
-
-  if (!agent) return; // 客服 agent 停用則不自動回覆
+  if (!agent) return; // 沒有對應角色則不自動回覆
 
   const { data: rules } = await sb
     .from('auto_replies')
@@ -107,25 +155,16 @@ async function handleCustomerService(
   let source: 'rule' | 'ai' | 'fallback';
 
   if (matched) {
-    // 1) 關鍵字規則優先（快、免費、可控）
     replyText = matched.reply_text;
     source = 'rule';
-  } else if (openaiConfigured() && cfg?.ai_enabled !== false) {
-    // 2) 沒命中規則 → 交給 OpenAI 生成回覆
+  } else if (openaiConfigured() && cfg?.ai_enabled !== false && cfg?.system_prompt) {
     try {
-      const systemPrompt =
-        cfg?.system_prompt ??
-        [
-          '你是一個電商 Line 官方帳號的客服助理，請用繁體中文、親切簡潔地回覆顧客。',
-          '回覆控制在 2~3 句內，必要時可用 1 個 emoji。',
-          '若顧客問到你無法確定的資訊（如特定訂單狀態、金額、個資），請引導他留下訂單編號並說明會由專人協助，切勿編造。',
-        ].join('\n');
       replyText = await chatComplete(
         [
-          { role: 'system', content: systemPrompt },
+          { role: 'system', content: cfg.system_prompt },
           { role: 'user', content: incoming },
         ],
-        { maxTokens: 400 }
+        { maxTokens: 500 }
       );
       source = 'ai';
     } catch (e) {
@@ -134,12 +173,11 @@ async function handleCustomerService(
       source = 'fallback';
     }
   } else {
-    // 3) 沒開 AI → 預設語
     replyText = fallback;
     source = 'fallback';
   }
 
-  await reply(replyToken, [text(replyText)]);
+  await reply(replyToken, [text(replyText)], token);
   await sb.from('messages').insert({
     agent_id: agent.id,
     line_user_id: userId ?? null,
