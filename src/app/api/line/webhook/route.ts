@@ -151,6 +151,16 @@ async function handleCustomerService(
   };
   const menuRoles = Array.isArray(cfg.menu_roles) ? cfg.menu_roles : [];
 
+  // 重置：切回該 OA 的預設角色（清掉該使用者在此 agent 的選擇），靜默不回覆
+  if (userId && incoming.trim() === '切換｜預設') {
+    try {
+      await sb.from('line_user_menu').delete().eq('line_user_id', userId).eq('agent_id', agent.id);
+    } catch (e) {
+      console.error('重置角色失敗', e);
+    }
+    return;
+  }
+
   // 圖文選單「角色切換」：訊息剛好等於某按鈕關鍵字 → 靜默切換該使用者角色，不回覆
   if (userId && menuRoles.length) {
     const hit = menuRoles.find((r) => r.keyword && incoming.trim() === r.keyword.trim());
