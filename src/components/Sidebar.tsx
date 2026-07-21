@@ -6,6 +6,7 @@ import { usePathname, useRouter } from 'next/navigation';
 const items = [
   { href: '/', label: '總覽', icon: '📊' },
   { href: '/agents', label: 'Agent 管理', icon: '🤖' },
+  { href: '/channels', label: 'LINE 頻道', icon: '🔗' },
   { href: '/broadcasts', label: '群發推播', icon: '📢' },
   { href: '/users', label: '好友名單', icon: '👥' },
   { href: '/messages', label: '訊息紀錄', icon: '📜' },
