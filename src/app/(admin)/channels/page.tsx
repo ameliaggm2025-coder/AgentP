@@ -11,7 +11,7 @@ async function load() {
     const { data } = await sb
       .from('agents')
       .select('*')
-      .eq('type', 'customer_service')
+      .in('type', ['customer_service', 'personal_assistant'])
       .order('created_at');
     const agents = (data ?? []) as Agent[];
     const views: ChannelAgentView[] = agents.map((a) => {
