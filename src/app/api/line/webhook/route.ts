@@ -17,6 +17,14 @@ type Channel = {
   token?: string; // 該 OA 的 access token（多租戶）
 };
 
+// 圖文選單可切換的角色（存在 agent.config.menu_roles 陣列）
+interface MenuRole {
+  key: string; // 角色識別碼，如 'copywriter'
+  keyword: string; // 圖文選單按鈕送出的文字，如 '切換｜文案手'
+  label: string; // 顯示名稱
+  system_prompt: string; // 切到此角色後使用的提示詞
+}
+
 /**
  * 依 webhook payload 的 destination（該 OA 的 bot userId）找出對應公司角色。
  * 多租戶：一支 webhook 服務多家 OA。
@@ -135,6 +143,53 @@ async function handleCustomerService(
 ) {
   if (!agent) return; // 沒有對應角色則不自動回覆
 
+  const cfg = agent.config as {
+    fallback_reply?: string;
+    ai_enabled?: boolean;
+    system_prompt?: string;
+    menu_roles?: MenuRole[];
+  };
+  const menuRoles = Array.isArray(cfg.menu_roles) ? cfg.menu_roles : [];
+
+  // 圖文選單「角色切換」：訊息剛好等於某按鈕關鍵字 → 靜默切換該使用者角色，不回覆
+  if (userId && menuRoles.length) {
+    const hit = menuRoles.find((r) => r.keyword && incoming.trim() === r.keyword.trim());
+    if (hit) {
+      try {
+        await sb.from('line_user_menu').upsert(
+          {
+            line_user_id: userId,
+            agent_id: agent.id,
+            role_key: hit.key,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'line_user_id,agent_id' }
+        );
+      } catch (e) {
+        console.error('角色切換寫入失敗', e);
+      }
+      return; // 不回確認訊息，直接切
+    }
+  }
+
+  // 依使用者目前選的角色決定生效的 system prompt；未選則用該 OA 預設角色
+  let effectivePrompt = cfg.system_prompt;
+  if (userId && menuRoles.length) {
+    try {
+      const { data: state } = await sb
+        .from('line_user_menu')
+        .select('role_key')
+        .eq('line_user_id', userId)
+        .eq('agent_id', agent.id)
+        .limit(1);
+      const roleKey = (state?.[0] as { role_key?: string } | undefined)?.role_key;
+      const sel = roleKey ? menuRoles.find((r) => r.key === roleKey) : undefined;
+      if (sel?.system_prompt) effectivePrompt = sel.system_prompt;
+    } catch (e) {
+      console.error('讀取使用者角色失敗', e);
+    }
+  }
+
   const { data: rules } = await sb
     .from('auto_replies')
     .select('*')
@@ -142,11 +197,6 @@ async function handleCustomerService(
     .eq('enabled', true)
     .order('priority', { ascending: false });
 
-  const cfg = agent.config as {
-    fallback_reply?: string;
-    ai_enabled?: boolean;
-    system_prompt?: string;
-  };
   const fallback = cfg?.fallback_reply ?? '感謝您的訊息，我們會盡快回覆您 🙏';
 
   const matched = (rules as AutoReply[] | null)?.find((r) => incoming.includes(r.keyword));
@@ -157,11 +207,11 @@ async function handleCustomerService(
   if (matched) {
     replyText = matched.reply_text;
     source = 'rule';
-  } else if (openaiConfigured() && cfg?.ai_enabled !== false && cfg?.system_prompt) {
+  } else if (openaiConfigured() && cfg?.ai_enabled !== false && effectivePrompt) {
     try {
       replyText = await chatComplete(
         [
-          { role: 'system', content: cfg.system_prompt },
+          { role: 'system', content: effectivePrompt },
           { role: 'user', content: incoming },
         ],
         { maxTokens: 500 }
