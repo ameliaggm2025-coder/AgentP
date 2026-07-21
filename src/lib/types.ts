@@ -1,4 +1,8 @@
-export type AgentType = 'transactional' | 'customer_service' | 'marketing';
+export type AgentType =
+  | 'transactional'
+  | 'customer_service'
+  | 'marketing'
+  | 'personal_assistant';
 
 export interface Agent {
   id: string;

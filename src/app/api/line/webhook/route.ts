@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
 import { verifySignature, reply, getProfile, text } from '@/lib/line';
 import { chatComplete, openaiConfigured } from '@/lib/openai';
+import { handleAssistantMessage } from '@/lib/assistant';
 import type { Agent, AutoReply } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -39,7 +40,7 @@ async function resolveChannel(
     const { data } = await sb
       .from('agents')
       .select('*')
-      .eq('type', 'customer_service')
+      .in('type', ['customer_service', 'personal_assistant'])
       .eq('enabled', true)
       .eq('config->>line_destination', destination)
       .limit(1);
@@ -123,7 +124,11 @@ export async function POST(req: Request) {
           content: incoming,
           status: 'received',
         });
-        await handleCustomerService(sb, channel.agent, ev.replyToken, incoming, userId, token);
+        if (channel.agent?.type === 'personal_assistant') {
+          await handlePersonalAssistant(sb, channel.agent, ev.replyToken, incoming, userId, token);
+        } else {
+          await handleCustomerService(sb, channel.agent, ev.replyToken, incoming, userId, token);
+        }
       }
     } catch (e) {
       console.error('webhook event error', e);
@@ -131,6 +136,42 @@ export async function POST(req: Request) {
   }
 
   return NextResponse.json({ ok: true });
+}
+
+/**
+ * 私人小助理：把使用者丟來的行程寫進個人 Google 日曆（依公司配色），並回覆確認。
+ * 若 config.owner_user_id 有設，只服務本人的 userId，避免他人加入誤用。
+ */
+async function handlePersonalAssistant(
+  sb: ReturnType<typeof supabaseAdmin>,
+  agent: Agent,
+  replyToken: string,
+  incoming: string,
+  userId: string | undefined,
+  token: string | undefined
+) {
+  const cfg = agent.config as { owner_user_id?: string };
+  if (cfg.owner_user_id && userId && userId !== cfg.owner_user_id) {
+    return; // 非本人，靜默略過
+  }
+
+  let replyText: string;
+  try {
+    replyText = await handleAssistantMessage(incoming);
+  } catch (e) {
+    console.error('小助理處理失敗', e);
+    replyText = '小助理暫時出了點狀況 😥 請稍後再試。';
+  }
+
+  await reply(replyToken, [text(replyText)], token);
+  await sb.from('messages').insert({
+    agent_id: agent.id,
+    line_user_id: userId ?? null,
+    direction: 'outbound',
+    message_type: 'reply',
+    content: replyText,
+    status: 'sent',
+  });
 }
 
 async function handleCustomerService(
