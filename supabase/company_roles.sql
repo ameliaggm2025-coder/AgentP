@@ -1,8 +1,11 @@
 -- ============================================================
 -- 森合 / 生寶 / 康亮 三家 LINE 角色（customer_service，預設待命 enabled=false）
--- 可重複執行：先依 role_code 刪除再插入
--- 注意：同一支 LINE OA 一次只能啟用一個 customer_service 角色（webhook 用 .single()）
---       要讓某家上線 → 先把其他 customer_service 停用，再啟用該家。
+--
+-- ⚠️⚠️ 危險：本檔會先 DELETE 再 INSERT（enabled=false、無金鑰）。
+--   若這三家「已經連線上線中」，重跑本檔會刪掉現有的 line_channel_secret /
+--   access_token / destination，等於把正在運作的 bot 打掉、退回未連線！
+--   只在「從零重建 / 角色尚未建立」時才執行；不確定就先別跑，改用後台
+--   「LINE 頻道」頁查看現況。
 -- ============================================================
 
 delete from agents where config->>'role_code' in ('SENHE','SHENGBAO','KANGLIANG');

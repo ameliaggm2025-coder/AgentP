@@ -1,10 +1,14 @@
 -- ============================================================
 -- ANZO & 群曜 兩家 LINE 客服角色（customer_service，預設待命 enabled=false）
--- 可重複執行：先依 role_code 刪除再插入。上線流程與森合/生寶/康亮相同，
--- 在後台「LINE 頻道」頁貼 secret/token 連線即會 enabled=true。
 --
--- 注意：這兩家目前沒有已核可的產品事實庫，system_prompt 內知識庫部分刻意保守，
---       細節一律轉專人；待有正式可宣稱內容後，再補進 system_prompt 或知識庫。
+-- ⚠️⚠️ 危險：本檔會先 DELETE 再 INSERT（enabled=false、無金鑰）。
+--   若 ANZO / 群曜 這兩支「已經連線上線中」，重跑本檔會刪掉現有的金鑰與
+--   destination，把正在運作的 bot 打掉、退回未連線！
+--   只在「從零重建 / 角色尚未建立」時才執行；不確定就先別跑，改用後台
+--   「LINE 頻道」頁查看現況。
+--
+-- 註：這兩家目前沒有已核可的產品事實庫，system_prompt 內知識庫部分刻意保守，
+--     細節一律轉專人；待有正式可宣稱內容後，再補進 system_prompt 或知識庫。
 -- ============================================================
 
 delete from agents where config->>'role_code' in ('ANZO','QUNYAO');
